@@ -1,0 +1,218 @@
+---
+title: "MovieLens project"
+author: "Federico Huxhagen"
+date: "December 2020"
+output: pdf_document
+---
+
+## Overview
+
+The purpose of this project is to build a movie recommendation system with the MovieLens dataset, by implementing Machine Learning techniques. Essentially, our goal is to predict, given data, what rating a user would give to a specific movie. 
+
+The MovieLens dataset was cleaned and then partitioned into 'edx' and 'validation' sets, both of which include six variables: userId, movieId, rating, timestamp, title and genres. After that, I built the model that would make it possible to predict the ratings. Finally, the model was tested on the validation set, using RMSE to determine its precision.  
+
+## Methods
+To start with, the original dataset was cleaned and organized to include the six variables we are going to work with, and it was partitioned into 'edx' and the 'validation' (which includes 10% of the data) sets.
+
+```{r echo = FALSE, include = FALSE, warning = FALSE, message = FALSE}
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier:
+# movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId], title = as.character(title), genres = as.character(genres))
+
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                            title = as.character(title),
+                                            genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+      semi_join(edx, by = "movieId") %>%
+      semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+It is important to analyse the structure of our 'edx' set: 
+```{r edx structure, echo = FALSE}
+str(edx, vec.len = 2)
+```
+
+As I have mentioned, there are six different variables: userId, movieId, rating, timestamp, title and genres. My approach was to build the recommendation system taking these into consideration. 
+
+The first step I took was to find the average rating across all movies, which we will call mu.
+
+We compute it like this:
+
+```{r average of all ratings}
+mu<- mean(edx$rating)
+```
+
+Then, if a movie gets a rating different from the average, we can argue that this is because of the different variables that are present. 
+
+To continue, it would be interesting to see if some movies are generally rated higher than others: essentially, is there 'movie bias'? We can see that in this plot:
+
+```{r histogram average ratings for each movie, message = FALSE, echo = FALSE, warning=FALSE}
+edx %>% 
+  group_by(movieId) %>%
+  summarize(movie_average = mean(rating)) %>%
+  ggplot(aes(movie_average)) +
+  geom_histogram(bins = 35, color= "black") 
+```
+
+It is clear that some movies are indeed rated higher on average than others. But how can we quantify this? We can write our model like this:
+
+$Rating = \mu + b_i + error$
+
+$b_i$ is the variable that accounts for movie bias. We can compute it by subtracting the average for all movies from the actual rating in each entry, and then take the average across all observations for each specific film.
+
+```{r compute b_i, warning = FALSE, message = FALSE}
+b_i <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu))
+```
+
+Now, we want to see if some users have a tendency to rate movies (in general) higher than others. We can plot the number of users against the average rating per user and we get this histogram:
+
+```{r histogram average rating for each user, echo = FALSE, warning= FALSE, message = FALSE}
+edx %>% 
+     group_by(userId) %>% 
+     summarize(user_average = mean(rating)) %>% 
+     ggplot(aes(user_average)) + 
+     geom_histogram(bins = 35, color = "black")
+```
+
+Clearly, different users tend to rate movies in different ways. We can add a new parameter to our model that accounts for user bias ($b_u$):
+
+$Rating = \mu + b_i + b_u + error$
+
+We can compute b_u for each user by subtracting $\mu$ and $b_i$ from the actual rating, and then take the mean for each user.
+
+```{r compute b_u, warning=FALSE, message = FALSE}
+b_u <- edx %>% 
+  left_join(b_i, by = "movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+```
+
+To keep improving our model, it would be interesting to see if different movie genres have an impact on ratings (essentially, are some genres rated higher on average than others?). We can build another histogram to see this:
+
+```{r histogram average rating for each genre, echo = FALSE, message = FALSE, warning= FALSE}
+edx %>% 
+  group_by(genres) %>%
+  summarize(genre_average = mean(rating)) %>%
+  ggplot(aes(genre_average)) +
+  geom_histogram(bins= 25, color = "black")
+```
+
+Once again, it is evident that movies of different genres have different ratings on average. We add a new parameter that accounts for this genre bias ($b_g$), resulting in the following model:
+
+$Rating = \mu + b_i + b_u + b_g + error$
+
+We compute $b_g$ by subtracting $\mu$, $b_i$ and $b_g$ from the actual rating for each entry, and then take the average for each of the 797 genres in the dataset.
+
+```{r compute b_g, warning= FALSE, message = FALSE}
+b_g <- edx %>% 
+  left_join(b_i, by='movieId') %>%
+  left_join(b_u, by='userId') %>%
+  group_by(genres) %>%
+  summarize(b_g = mean(rating - mu - b_i - b_u))
+```
+
+We are now ready to test the model on the validation test. We will predict a rating for each entry in our validation set (y_hat). For each case, we will simple compute the sum of $\mu + b_i + b_u + b_g$
+
+```{r predict ratings on validation set, warning = FALSE, message = FALSE}
+y_hat <- validation %>% 
+  left_join(b_i, by='movieId') %>%
+  left_join(b_u, by='userId') %>%
+  left_join(b_g, by="genres")%>%
+  mutate(pred = mu + b_i + b_u + b_g) %>%
+  pull(pred)
+```
+
+Now that we have a prediction, there is a detail we must take into account. The ratings in the edx dataset range from 0.5 to 5. 
+
+```{r Min and max edx ratings, echo = FALSE, warning = FALSE, message = FALSE}
+edx %>% summarise(min_value= min(rating), max_value = max(rating))
+```
+
+Now, let's look at the maximum and minimum values in our predictions.
+
+```{r min and max predictions, echo = FALSE, warning= FALSE, message = FALSE}
+summarise(as.data.frame(y_hat), min_value = min(y_hat), max_value = max(y_hat))
+```
+
+So, we have values that are lower than 0.5 and others higher than 5. This can never be the case. Therefore, we interpret that if a user should give a movie over a 5-star rating, they would give it the highest possible rating (5). And if we predict a user would give a movie less than a 0.5 rating (which means they hated it), they would give it the lowest possible rating.
+
+To correct this, we need to find which predicted ratings are lower than 0.5 and replace them with 0.5, and find which are higher than 5 and replace them with 5.
+
+```{r replace values lower than 0.5 or higher than 5}
+ind_lower<- which(y_hat<0.5)
+y_hat[ind_lower]<- 0.5 
+
+ind_over<- which(y_hat>5)
+y_hat[ind_over]<- 5
+
+```
+
+Now that we have a final prediction for the validation set, we can examine our model's performance. 
+
+## Results
+I have mentioned that we will use RMSE to analyze how well our model works. Let's create a function that takes as input the actual ratings and our predicted ratings and then computes the RMSE. 
+
+```{r function to compute RMSE}
+RMSE<- function(actual_ratings, predicted_ratings){
+  sqrt(mean((actual_ratings - predicted_ratings)^2))
+}
+```
+
+Now, we can compute the RMSE of our model:
+
+```{r compute RMSE}
+RMSE(validation$rating, y_hat)
+```
+
+I have been able to build a model with an RMSE of 0.8647516, lower than our goal of 0.86490.
+
+## Conclusions
+We started out the with a clear objective: to build a recommendation system that would predict the rating for a specific movie by a user knowing some data, as precisely as possible. We have built a model that accounts for movie bias (the fact that some movies are better than others), user bias (some users are less demanding when it comes to movies than others) and genre bias (the fact that certain genres are better rated on average than others). We have tested the model and obtained an RMSE of 0.8647516.
+
+However, is it possible to do better? It certainly is. For starters, we did not use the "timestamp" variable in our model, which could have an influence we have not taken into account. 
+
+Apart from that, regularization has not been used when determining the parameters of our model. If a movie has just a few very high ratings, we assume that it has a high b_i. However, this is not necessarily the case. It is necessary to regularize and, in a way, correct the parameters of those films/genres/users that have few ratings. If we do this, it is possible to obtain better estimates. 
+
+It is possible, by adding these changes to our model, to make it even more precise. 
